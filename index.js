@@ -8,7 +8,7 @@ const app = new App({
   socketMode: true,
 });
 
-async function getApodMessage() {
+async function sendAPODToChannel(channel) {
   let imageUrl = "https://picsum.photos/1024";
   let hdUrl = "https://picsum.photos/1920";
   let title = "Contact @pythonatsea if you see this";
@@ -20,54 +20,69 @@ async function getApodMessage() {
     imageUrl = data.url;
     hdUrl = data.hdurl;
     title = data.title;
-  } catch (error) {
-    return {
-      blocks: [{ type: "text", text: error }],
-    };
-  }
-  return {
-    blocks: [
-      {
-        type: "header",
-        text: {
-          type: "plain_text",
-          text: title,
-          emoji: true,
-        },
-        level: 1,
-      },
-      {
-        type: "image",
-        image_url: imageUrl,
-        alt_text: "",
-      },
-      {
-        type: "actions",
-        elements: [
+    explanation = data.explanation.replace(/\s+/g, " ");
+    topLevel = await app.client.chat.postMessage(
+      (ChatPostMessageArguments = {
+        channel: channel,
+        blocks: [
           {
-            type: "button",
-            style: "primary",
+            type: "header",
             text: {
               type: "plain_text",
-              text: "Full HD Image :external-link:",
+              text: title,
               emoji: true,
             },
-            url: hdUrl,
-            action_id: "url",
+            level: 1,
+          },
+          {
+            type: "image",
+            image_url: imageUrl,
+            alt_text: "",
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                style: "primary",
+                text: {
+                  type: "plain_text",
+                  text: "Full HD Image :external-link:",
+                  emoji: true,
+                },
+                url: hdUrl,
+                action_id: "url",
+              },
+            ],
           },
         ],
-      },
-    ],
-  };
+      }),
+    );
+    app.client.chat.postMessage(
+      (ChatPostMessageArguments = {
+        channel: channel,
+        thread_ts: topLevel.ts,
+        text: explanation,
+      }),
+    );
+    console.log(topLevel);
+  } catch (error) {
+    app.client.chat.postMessage(
+      (ChatPostMessageArguments = {
+        channel: channel,
+        text: error,
+      }),
+    );
+  }
 }
 
-app.command("/apod", async ({ ack, respond }) => {
+app.command("/apod", async ({ ack, respond, command }) => {
   await ack();
-  await respond(await getApodMessage());
+  await sendAPODToChannel(command.channel_id);
 });
 
-app.event("app_mention", async ({ say }) => {
-  await say(await getApodMessage());
+app.event("app_mention", async ({ event }) => {
+  await sendAPODToChannel(event.channel);
 });
 
 app.action("url", async ({ ack, respond }) => {
