@@ -3,6 +3,7 @@ require("dotenv").config();
 const { App } = require("@slack/bolt");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
+const cron = require("node-cron");
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -48,13 +49,26 @@ async function fetchAPOD() {
       lastError = error;
 
       if (attempt < 5) {
-        console.warn(`fetch+parse failed, retrying (${attempt}/5})`, error);
+        console.warn(`fetch+parse failed, retrying (${attempt}/5)`, error);
       }
     }
   }
 
   throw lastError;
 }
+
+let cachedAPOD = fetchAPOD();
+
+console.log("fetched apod for first time");
+
+cron.schedule("*/5 * * * *", async () => {
+  try {
+    cachedAPOD = fetchAPOD();
+    console.log("refreshed cached apod");
+  } catch (error) {
+    console.error("failed to refresh cached apod", error);
+  }
+});
 
 function enrollChannel(channel) {
   return new Promise((resolve, reject) => {
@@ -130,61 +144,83 @@ function shouldAskUser(user, channel) {
   });
 }
 
-async function sendAPODToChannel(channel) {
+function sendToAll() {
+  db.all("SELECT channel_id FROM enrolled_channels", async (err, rows) => {
+    if (err) {
+      console.error("error fetching enrolled channels", err);
+    } else {
+      const channels = rows.map((row) => row.channel_id);
+      await sendAPODToChannel(channels);
+    }
+  });
+}
+
+async function sendAPODToChannel(channels) {
   let imageUrl = "https://picsum.photos/1024";
   let hdUrl = "https://picsum.photos/1920";
   let title = "Contact @pythonatsea if you see this";
   try {
-    const data = await fetchAPOD();
-    imageUrl = data.url;
-    hdUrl = data.hdurl;
-    title = data.title;
-    explanation = data.explanation.replace(/\s+/g, " ");
-    topLevel = await app.client.chat.postMessage(
-      (ChatPostMessageArguments = {
-        channel: channel,
-        text: title,
-        blocks: [
-          {
-            type: "header",
-            text: {
-              type: "plain_text",
-              text: title,
-              emoji: true,
-            },
-            level: 1,
-          },
-          {
-            type: "image",
-            image_url: imageUrl,
-            alt_text: "",
-          },
-          {
-            type: "actions",
-            elements: [
-              {
-                type: "button",
-                style: "primary",
-                text: {
-                  type: "plain_text",
-                  text: "Full HD Image :external-link:",
-                  emoji: true,
-                },
-                url: hdUrl,
-                action_id: "url",
+    if (
+      !cachedAPOD ||
+      !cachedAPOD.url ||
+      !cachedAPOD.hdurl ||
+      !cachedAPOD.title ||
+      !cachedAPOD.explanation
+    ) {
+      cachedAPOD = await fetchAPOD();
+      console.log("cached apod was null or invalid, fetched new one");
+    }
+    imageUrl = cachedAPOD.url;
+    hdUrl = cachedAPOD.hdurl;
+    title = cachedAPOD.title;
+    explanation = cachedAPOD.explanation.replace(/\s+/g, " ");
+    for (const channel of Array.isArray(channels) ? channels : [channels]) {
+      topLevel = await app.client.chat.postMessage(
+        (ChatPostMessageArguments = {
+          channel: channel,
+          text: title,
+          blocks: [
+            {
+              type: "header",
+              text: {
+                type: "plain_text",
+                text: title,
+                emoji: true,
               },
-            ],
-          },
-        ],
-      }),
-    );
-    app.client.chat.postMessage(
-      (ChatPostMessageArguments = {
-        channel: channel,
-        thread_ts: topLevel.ts,
-        text: explanation,
-      }),
-    );
+              level: 1,
+            },
+            {
+              type: "image",
+              image_url: imageUrl,
+              alt_text: "",
+            },
+            {
+              type: "actions",
+              elements: [
+                {
+                  type: "button",
+                  style: "primary",
+                  text: {
+                    type: "plain_text",
+                    text: "Full HD Image :external-link:",
+                    emoji: true,
+                  },
+                  url: hdUrl,
+                  action_id: "url",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      app.client.chat.postMessage(
+        (ChatPostMessageArguments = {
+          channel: channel,
+          thread_ts: topLevel.ts,
+          text: explanation,
+        }),
+      );
+    }
     console.log(topLevel);
   } catch (error) {
     console.error(error);
@@ -260,9 +296,14 @@ app.command("/apod", async ({ ack, respond, command }) => {
   }
 });
 
-app.event("app_mention", async ({ event }) => {
-  await sendAPODToChannel(event.channel);
-});
+cron.schedule(
+  "0 12 * * *",
+  () => {
+    sendToAll();
+    console.log("sending to all channels from cron");
+  },
+  (timezone = "America/New_York"),
+);
 
 app.action("url", async ({ ack, respond }) => {
   await ack();
