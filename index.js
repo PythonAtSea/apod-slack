@@ -4,6 +4,7 @@ const { App } = require("@slack/bolt");
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const cron = require("node-cron");
+const chrono = require("chrono-node");
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -30,13 +31,13 @@ const db = new sqlite3.Database(dbPath, (err) => {
   }
 });
 
-async function fetchAPOD() {
+async function fetchAPOD(date = null, random = false) {
   let lastError;
 
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
+  for (let attempt = 1; true; attempt += 1) {
     try {
       const response = await fetch(
-        `https://api.nasa.gov/planetary/apod?api_key=${process.env.NASA_API_KEY}`,
+        `https://api.nasa.gov/planetary/apod?api_key=${process.env.NASA_API_KEY}${date && !random ? `&date=${date}` : ""}${random ? "&count=1" : ""}`,
       );
 
       if (!response.ok) {
@@ -48,18 +49,14 @@ async function fetchAPOD() {
     } catch (error) {
       lastError = error;
 
-      if (attempt < 5) {
-        console.warn(`fetch+parse failed, retrying (${attempt}/5)`, error);
-      }
+      console.warn(`fetch+parse failed, retrying (${attempt}/∞)`, error);
     }
   }
 
   throw lastError;
 }
 
-let cachedAPOD = fetchAPOD();
-
-console.log("fetched apod for first time");
+let cachedAPOD = null;
 
 cron.schedule("*/5 * * * *", async () => {
   try {
@@ -155,25 +152,30 @@ function sendToAll() {
   });
 }
 
-async function sendAPODToChannel(channels) {
+async function sendAPODToChannel(channels, date = null) {
   let imageUrl = "https://picsum.photos/1024";
   let hdUrl = "https://picsum.photos/1920";
   let title = "Contact @pythonatsea if you see this";
   try {
-    if (
+    if (date !== null) {
+      APODData = await fetchAPOD(date);
+      console.log("fetched apod for specific date", date);
+    } else if (
       !cachedAPOD ||
       !cachedAPOD.url ||
       !cachedAPOD.hdurl ||
       !cachedAPOD.title ||
       !cachedAPOD.explanation
     ) {
-      cachedAPOD = await fetchAPOD();
+      APODData = await fetchAPOD();
       console.log("cached apod was null or invalid, fetched new one");
+    } else {
+      APODData = cachedAPOD;
     }
-    imageUrl = cachedAPOD.url;
-    hdUrl = cachedAPOD.hdurl;
-    title = cachedAPOD.title;
-    explanation = cachedAPOD.explanation.replace(/\s+/g, " ");
+    imageUrl = APODData.url;
+    hdUrl = APODData.hdurl;
+    title = APODData.title;
+    explanation = APODData.explanation.replace(/\s+/g, " ");
     for (const channel of Array.isArray(channels) ? channels : [channels]) {
       topLevel = await app.client.chat.postMessage(
         (ChatPostMessageArguments = {
@@ -290,7 +292,21 @@ async function promptToEnroll(channel, user, respond) {
 
 app.command("/apod", async ({ ack, respond, command }) => {
   await ack();
-  await sendAPODToChannel(command.channel_id);
+  let date = null;
+  if (command.text) {
+    try {
+      date = chrono.parseDate(command.text).toISOString().split("T")[0];
+      await sendAPODToChannel(command.channel_id, date);
+    } catch (error) {
+      respond({
+        response_type: "ephemeral",
+        text: "Hmm, that doesn't look like a valid date.",
+      });
+      return;
+    }
+  } else {
+    await sendAPODToChannel(command.channel_id);
+  }
   if (await shouldAskUser(command.user_id, command.channel_id)) {
     await promptToEnroll(command.channel_id, command.user_id, respond);
   }
@@ -352,6 +368,9 @@ app.action("enroll_later", async ({ ack, respond }) => {
 });
 
 (async () => {
+  cachedAPOD = await fetchAPOD();
+  console.log("fetched apod for first time");
+
   await app.start();
   console.log("bot is running!");
 })();
